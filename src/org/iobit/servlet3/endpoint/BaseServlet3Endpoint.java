@@ -220,9 +220,13 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                     synchronized (lock) {
                         --streamingClientsCount;
                         canStream = (streamingClientsCount < maxStreamingClients);
-                        synchronized (session) {
-                            --session.streamingConnectionsCount;
-                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
+                        
+                        //If the flex client closes the session the FlexSession would be null at this point -HT
+                        if (session != null) { 
+	                        synchronized (session) {
+	                            --session.streamingConnectionsCount;
+	                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
+	                        }
                         }
                     }
     
@@ -230,10 +234,15 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                         currentStreamingRequests.remove(notifier.getNotifierId());
                         notifier.close();
                     }
-    
-                    // Output session level streaming count.
-                    debug("Number of streaming clients for FlexSession with id '"+ session.getId() +"' is " + session.streamingConnectionsCount + ".");
-    
+                    
+                    //If the flex client closes the session the FlexSession would be null at this point -HT
+                    if (session != null) {
+                    	// Output session level streaming count.
+                    	debug("Number of streaming clients for FlexSession with id '"+ session.getId() +"' is " + session.streamingConnectionsCount + ".");
+                    } else {
+                    	debug("FlexSession was closed and unable to determine the details.");
+                    }
+                    
                     // Output endpoint level streaming count.
                     debug("Number of streaming clients for endpoint with id '"+ getId() +"' is " + streamingClientsCount + ".");
                 } catch (Exception e) {
