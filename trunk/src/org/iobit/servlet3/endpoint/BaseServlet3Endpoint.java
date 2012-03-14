@@ -23,13 +23,17 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.Executor;
 
 /**
  * Base for HTTP-based endpoints that support streaming HTTP connections to
@@ -46,9 +50,11 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
     private static final byte NULL_BYTE = (byte)0; // signal that a chunk of data should be skipped by the client.
     private static final int DEFAULT_MAX_STREAMING_CLIENTS = 10;
 
-    private Thread notifierThread = null;
+    // Using a single threaded executor for handling all the pushing
+    private ExecutorService notifierThread = null;
+    private Runnable notifierRunnable = null;
     private static final Queue<AsyncContext> queue = new ConcurrentLinkedQueue<AsyncContext>();
-    boolean done = false;
+    private static boolean notifierRunning = false;
 
     /**
      * Used to synchronize sets and gets to the number of streaming clients.
@@ -65,6 +71,11 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
      * Manages timing out EndpointPushNotifier instances.
      */
     private volatile TimeoutManager pushNotifierTimeoutManager;
+    
+    /**
+     * The function used for pushing messages inside the notifierThread
+     */
+    private Method pushFunction;
 
     /**
      * A Map(EndpointPushNotifier, Boolean.TRUE) containing all currently open streaming notifiers
@@ -137,10 +148,15 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
         // Set initial state for the canWait flag based on whether we allow waits or not.
         canStream = (maxStreamingClients > 0);
         final FlexSession session = FlexContext.getFlexSession();
-        Runnable notifierRunnable = new Runnable() {
+        notifierRunnable = new Runnable() {
             public void run() {
-                while (!done) {
+            	notifierRunning = true;
+            	
+            	//Continue to push only if the queue contains AsyncContexts - HT
+                while ( !queue.isEmpty() ) {
+                	
                     for (AsyncContext ac : queue) {
+                    	
                         EndpointPushNotifier notifier = null;
                         try {
                             if (ac.getRequest() == null) {
@@ -213,6 +229,9 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                         }
                     }
                 }
+                
+                notifierRunning = false;
+                
             }
 
             private void cleanUp(EndpointPushNotifier notifier, FlexSession session) {
@@ -251,8 +270,9 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
             }
                 
         };
-        notifierThread = new Thread(notifierRunnable);
-        notifierThread.start();
+        
+        //Create a single threaded executor - HT
+        notifierThread = Executors.newSingleThreadExecutor();
     }
 
 
@@ -303,7 +323,10 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
             notifier.close();
 
         currentStreamingRequests = null;
-        done = true;
+        
+        //Shutdown the single threaded executor - HT
+        notifierThread.shutdown();
+        
         super.stop();
     }
 
@@ -518,17 +541,17 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 actx.addListener(new AsyncListener() {
                     @Override
                     public void onTimeout(AsyncEvent event) throws IOException {
-                        debug("Timeout! " + event.getThrowable());
+                        debug("Timeout! " + event.toString() );
                     }
                     
                     @Override
                     public void onStartAsync(AsyncEvent event) throws IOException {
-                        debug("Start async! " + event);
+                        debug("Start async! " + event.toString() );
                     }
                     
                     @Override
                     public void onError(AsyncEvent event) throws IOException {
-                        debug("Error! " + event);
+                        debug("Error! " + event.toString() );
                     }
                     
                     @Override
@@ -559,9 +582,18 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 });
                 actx.setTimeout(3 * 60 * 1000); // 3 minutes
                 queue.add(actx);
+                
+                //If the notifier thread is not running then start it.
+                if ( !notifierRunning ) {
+                	debug( "starting notifierThread running");
+                	notifierThread.execute( notifierRunnable );
+                }
+                
             } catch (IOException e) {
                 if (Log.isWarn() && !suppressIOExceptionLogging)
                     log.warn("Streaming thread '" + threadName + "' for endpoint with id '" + getId() + "' is closing connection due to an IO error.", e);
+            } catch ( Exception e ) {
+            	e.printStackTrace();
             }
         } else { // Otherwise, client's streaming connection open request could not be granted.
             if (Log.isError()) {
