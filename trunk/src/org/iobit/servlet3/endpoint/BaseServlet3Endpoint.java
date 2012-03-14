@@ -236,34 +236,27 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
 
             private void cleanUp(EndpointPushNotifier notifier, FlexSession session) {
                 try {
-                    synchronized (lock) {
-                        --streamingClientsCount;
-                        canStream = (streamingClientsCount < maxStreamingClients);
-                        
-                        //If the flex client closes the session the FlexSession would be null at this point -HT
-                        if (session != null) { 
-	                        synchronized (session) {
-	                            --session.streamingConnectionsCount;
-	                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
-	                        }
-                        }
-                    }
-    
+ 					debug("cleanUp");
+//                	This is already done in onComplete - HT                	
+//                    synchronized (lock) {
+//                        --streamingClientsCount; 
+//                        canStream = (streamingClientsCount < maxStreamingClients);
+//                        
+//                        //If the flex client closes the session the FlexSession would be null at this point -HT
+//                        if (session != null) { 
+//	                        synchronized (session) {
+//	                            --session.streamingConnectionsCount;
+//	                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
+//	                        }
+//                        }
+//                    }
+//    
                     if (notifier != null && currentStreamingRequests != null) {
                         currentStreamingRequests.remove(notifier.getNotifierId());
                         notifier.close();
                     }
                     
-                    //If the flex client closes the session the FlexSession would be null at this point -HT
-                    if (session != null) {
-                    	// Output session level streaming count.
-                    	debug("Number of streaming clients for FlexSession with id '"+ session.getId() +"' is " + session.streamingConnectionsCount + ".");
-                    } else {
-                    	debug("FlexSession was closed and unable to determine the details.");
-                    }
                     
-                    // Output endpoint level streaming count.
-                    debug("Number of streaming clients for endpoint with id '"+ getId() +"' is " + streamingClientsCount + ".");
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -541,22 +534,22 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 actx.addListener(new AsyncListener() {
                     @Override
                     public void onTimeout(AsyncEvent event) throws IOException {
-                        debug("Timeout! " + event.toString() );
+                        debug("AsyncContext Timeout! " + event.toString() );
                     }
                     
                     @Override
                     public void onStartAsync(AsyncEvent event) throws IOException {
-                        debug("Start async! " + event.toString() );
+                        debug("AsyncContext Start async! " + event.toString() );
                     }
                     
                     @Override
                     public void onError(AsyncEvent event) throws IOException {
-                        debug("Error! " + event.toString() );
+                        debug("AsyncContext Error! " + event.toString() );
                     }
                     
                     @Override
                     public void onComplete(AsyncEvent event) throws IOException {
-                        debug("Complete! " + event);
+                        debug("AsyncContext Complete! " + event);
                         synchronized (lock) {
                             --streamingClientsCount;
                             canStream = (streamingClientsCount < maxStreamingClients);
@@ -578,6 +571,18 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                             --session.streamingConnectionsCount;
                             session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
                         }
+                        
+                       //If the flex client closes the session the FlexSession would be null at this point -HT
+                        if (session != null) {
+                        	// Output session level streaming count.
+                        	debug("Number of streaming clients for FlexSession with id '"+ session.getId() +"' is " + session.streamingConnectionsCount + ".");
+                        } else {
+                        	debug("FlexSession was closed and unable to determine the details.");
+                        }
+                        
+                        // Output endpoint level streaming count.
+                        debug("Number of streaming clients for endpoint with id '"+ getId() +"' is " + streamingClientsCount + ".");
+                        
                     }
                 });
                 actx.setTimeout(3 * 60 * 1000); // 3 minutes
