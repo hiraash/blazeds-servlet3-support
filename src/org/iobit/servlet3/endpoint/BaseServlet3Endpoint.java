@@ -18,12 +18,10 @@ import javax.servlet.AsyncContext;
 import javax.servlet.AsyncEvent;
 import javax.servlet.AsyncListener;
 import javax.servlet.ServletOutputStream;
-import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,7 +31,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.Executor;
 
 /**
  * Base for HTTP-based endpoints that support streaming HTTP connections to
@@ -71,11 +68,6 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
      * Manages timing out EndpointPushNotifier instances.
      */
     private volatile TimeoutManager pushNotifierTimeoutManager;
-    
-    /**
-     * The function used for pushing messages inside the notifierThread
-     */
-    private Method pushFunction;
 
     /**
      * A Map(EndpointPushNotifier, Boolean.TRUE) containing all currently open streaming notifiers
@@ -154,6 +146,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
             	
             	//Continue to push only if the queue contains AsyncContexts - HT
                 while ( !queue.isEmpty() ) {
+                	debug ( "queue count : " + queue.size() );
                 	
                     for (AsyncContext ac : queue) {
                     	
@@ -183,7 +176,6 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                                 cleanUp(notifier, session);
                             }
                             synchronized (notifier.pushNeeded) {
-                                debug ("pushing messages");
                                 // Drain any messages that might have been accumulated
                                 // while the previous drain was being processed.
                                 streamMessages(notifier.drainMessages(), os, res);
@@ -585,7 +577,14 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                         
                     }
                 });
-                actx.setTimeout(3 * 60 * 1000); // 3 minutes
+                
+                // Set the context timeout to the user specified value.
+                if (getConnectionIdleTimeoutMinutes() > 0) {
+                	actx.setTimeout( getConnectionIdleTimeoutMinutes() * 60 * 1000 );
+                } else {
+                	actx.setTimeout(3 * 60 * 1000); // 3 minutes
+                }
+                
                 queue.add(actx);
                 
                 //If the notifier thread is not running then start it.
