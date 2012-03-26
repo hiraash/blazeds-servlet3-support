@@ -143,17 +143,17 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
         notifierRunnable = new Runnable() {
             public void run() {
             	notifierRunning = true;
+            	debug ( "notifyThread Started queue : " + queue.size() );
             	
             	//Continue to push only if the queue contains AsyncContexts - HT
                 while ( !queue.isEmpty() ) {
-                	debug ( "queue count : " + queue.size() );
                 	
                     for (AsyncContext ac : queue) {
                     	
                         EndpointPushNotifier notifier = null;
                         try {
-                            if (ac.getRequest() == null) {
-                                debug("get the async context with empty request - odd!");
+                        	//If the AsyncContext has completed (due to timeout) then remove it.
+                            if (ac.getRequest() == null || !ac.getRequest().isAsyncStarted() ) {
                                 queue.remove(ac);
                                 cleanUp(notifier, session);
                                 continue;
@@ -187,7 +187,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                                 // byte as a heartbeat to make sure the client is still valid.
                                 if (messages == null && getServerToClientHeartbeatMillis() > 0) {
                                     try {
-                                        debug("stream hearbeat");
+                                        //debug("stream hearbeat");
                                         os.write(NULL_BYTE);
                                         res.flushBuffer();
                                     } catch (Exception e) {
@@ -222,6 +222,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                     }
                 }
                 
+                debug ( "notifyThread Ended queue : " + queue.size() );
                 notifierRunning = false;
                 
             }
@@ -309,10 +310,17 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
 
         currentStreamingRequests = null;
         
-        //Shutdown the single threaded executor - HT
-        notifierThread.shutdown();
+        clearThreadLocals();
         
+        debug("before notifier shutdown");
+        //Shutdown the single threaded executor - HT
+        notifierThread.shutdownNow();
+        //notifierThread.shutdown();
+        
+        debug("before super.stop");
         super.stop();
+        
+        debug("stop completing");
     }
 
     //--------------------------------------------------------------------------
@@ -464,7 +472,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
 
                 // Setup serialization and type marshalling contexts
                 setThreadLocals();
-                debug("thead locals is good");
+                debug("thread locals is good");
 
                 // Activate streaming helper for this connection.
                 // Watch out for duplicate stream issues.
@@ -579,6 +587,8 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 });
                 
                 // Set the context timeout to the user specified value.
+                
+                debug ( "getConnectionIdleTimeoutMinutes = " + getConnectionIdleTimeoutMinutes() );
                 if (getConnectionIdleTimeoutMinutes() > 0) {
                 	actx.setTimeout( getConnectionIdleTimeoutMinutes() * 60 * 1000 );
                 } else {
