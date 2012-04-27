@@ -22,6 +22,9 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.sql.Date;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -30,7 +33,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Base for HTTP-based endpoints that support streaming HTTP connections to
@@ -44,14 +50,36 @@ import java.util.concurrent.ThreadFactory;
  * BaseHTTPEndpoint instead.
  */
 public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
+	
     private static final byte NULL_BYTE = (byte)0; // signal that a chunk of data should be skipped by the client.
-    private static final int DEFAULT_MAX_STREAMING_CLIENTS = 10;
+    
+    private static final int DEFAULT_MAX_STREAMING_CLIENTS = 500;
+    
+    private static final String P_NAME_ENABLE_DEBUG = "enable-debug-mode";
+    private static final String P_NAME_MAX_STREAMING_CLIENTS = "max-streaming-clients";
+    
+    private static boolean DEBUG_ON = false;
 
-    // Using a single threaded executor for handling all the pushing
+    /**
+     * This is the executor service which will ensure a single thread run at all times
+     * for the message pushing runnable
+     */
     private ExecutorService notifierThread = null;
+    
+    /**
+     * The runnable that contains the code for pushing messages
+     */
     private Runnable notifierRunnable = null;
+    
+    /**
+     * Indicator for notifierThread status
+     */
+    private static Future threadState;
+    
+    /**
+     * The queue of AsyncContexts that need to be processed.
+     */
     private static final Queue<AsyncContext> queue = new ConcurrentLinkedQueue<AsyncContext>();
-    private static boolean notifierRunning = false;
 
     /**
      * Used to synchronize sets and gets to the number of streaming clients.
@@ -129,152 +157,99 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
      * @param properties Properties for the <code>Endpoint</code>.
      */
     @Override
-    public void initialize(String id, ConfigMap properties) {
+    public void initialize( String id, ConfigMap properties ) {
         super.initialize(id, properties);
+        
+        this.setDebugStatus(properties);
+        
         debug("Initializing BaseServelt3Endpoint");
 
         // Maximum number of clients allowed to have streaming HTTP connections with the endpoint.
-        maxStreamingClients = properties.getPropertyAsInt("max-streaming-clients", DEFAULT_MAX_STREAMING_CLIENTS);
-        debug("Max client to stream: " + maxStreamingClients);
+        maxStreamingClients = properties.getPropertyAsInt(P_NAME_MAX_STREAMING_CLIENTS, DEFAULT_MAX_STREAMING_CLIENTS);
+        debug("Max allowed clients for streaming: " + maxStreamingClients );
         
         // Set initial state for the canWait flag based on whether we allow waits or not.
         canStream = (maxStreamingClients > 0);
-        final FlexSession session = FlexContext.getFlexSession();
+        
+        //final FlexSession session = FlexContext.getFlexSession();
+        
         notifierRunnable = new Runnable() {
-            public void run() {
-            	notifierRunning = true;
+        	public void run() {
             	debug ( "notifyThread Started queue : " + queue.size() );
-            	
-            	//Continue to push only if the queue contains AsyncContexts - HT
-                while ( !queue.isEmpty() ) {
-                	
-                    for (AsyncContext ac : queue) {
-                    	
-                        EndpointPushNotifier notifier = null;
-                        try {
-                        	//If the AsyncContext has completed (due to timeout) then remove it.
-                            if (ac.getRequest() == null || !ac.getRequest().isAsyncStarted() ) {
-                                queue.remove(ac);
-                                cleanUp(notifier, session);
-                                continue;
-                            }
-                            
-                            notifier =
-                                (EndpointPushNotifier) ac.getRequest().getAttribute("pushNotifier");
-                            FlexClient flexClient = 
-                                (FlexClient) ac.getRequest().getAttribute("flexClient");
-                            HttpServletResponse res = (HttpServletResponse) ac.getResponse();
-                            ServletOutputStream os = res.getOutputStream();
-                            if (notifier.isClosed()) {
-                                debug("notifier is closed, time to end our streaming");
-                                // Terminate the response.
-                                streamChunk(null, os, res);
-                                if (ac.getRequest().isAsyncStarted()) {
-                                    ac.complete();
-                                }
-                                queue.remove(ac);
-                                cleanUp(notifier, session);
-                            }
-                            synchronized (notifier.pushNeeded) {
-                                // Drain any messages that might have been accumulated
-                                // while the previous drain was being processed.
-                                streamMessages(notifier.drainMessages(), os, res);
-
-                                notifier.pushNeeded.wait(getServerToClientHeartbeatMillis());
-
-                                List<AsyncMessage> messages = notifier.drainMessages();
-                                // If there are no messages to send to the client, send an null
-                                // byte as a heartbeat to make sure the client is still valid.
-                                if (messages == null && getServerToClientHeartbeatMillis() > 0) {
-                                    try {
-                                        //debug("stream hearbeat");
-                                        os.write(NULL_BYTE);
-                                        res.flushBuffer();
-                                    } catch (Exception e) {
-                                        if (Log.isWarn())
-                                            log.warn("Endpoint with id '" + getId() + "' is closing the streaming connection to FlexClient with id '"
-                                                    + flexClient.getId() + "' because endpoint encountered a socket write error" +
-                                            ", possibly due to an unresponsive FlexClient.", e);
-                                        continue; // Exit the wait loop.
-                                    }
-                                } else { // Otherwise stream the messages to the client.
-                                    debug("stream messages");
-                                    // Update the last time notifier was used to drain messages.
-                                    // Important for idle timeout detection.
-                                    streamMessages(messages, os, res);
-                                    notifier.updateLastUse();
-                                }
-                                
-                            }
-                            // Update the FlexClient last use time to prevent FlexClient from
-                            // timing out when the client is still subscribed. It is important
-                            // to do this outside synchronized(notifier.pushNeeded) to avoid
-                            // thread deadlock!
-                            flexClient.updateLastUse();
-                        } catch (Exception ex) {
-                            ex.printStackTrace();
-                            if (ac.getRequest().isAsyncStarted()) {
-                                ac.complete();
-                            }
-                            queue.remove(ac);
-                            cleanUp(notifier, session);
-                        }
-                    }
-                }
-                
+            	pushMessages( );
                 debug ( "notifyThread Ended queue : " + queue.size() );
-                notifierRunning = false;
                 
             }
-
-            private void cleanUp(EndpointPushNotifier notifier, FlexSession session) {
-                try {
- 					debug("cleanUp");
-//                	This is already done in onComplete - HT                	
-//                    synchronized (lock) {
-//                        --streamingClientsCount; 
-//                        canStream = (streamingClientsCount < maxStreamingClients);
-//                        
-//                        //If the flex client closes the session the FlexSession would be null at this point -HT
-//                        if (session != null) { 
-//	                        synchronized (session) {
-//	                            --session.streamingConnectionsCount;
-//	                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
-//	                        }
-//                        }
-//                    }
-//    
-                    if (notifier != null && currentStreamingRequests != null) {
-                        currentStreamingRequests.remove(notifier.getNotifierId());
-                        notifier.close();
-                    }
-                    
-                    
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-                
         };
         
         //Create a single threaded executor - HT
         notifierThread = Executors.newSingleThreadExecutor();
+        
     }
 
-
-    private void debug(String msg) {
-        System.out.println(Thread.currentThread().getName() + " - " + msg);
+    //--------------------------------------------------------------------------
+    //
+    // Debug and Trace methods
+    //
+    //-------------------------------------------------------------------------- 
+    static DateFormat dateFormat;
+    private void debug( String msg ) {
+    	if ( DEBUG_ON ) {
+    		
+    		if ( dateFormat == null ) {
+    			dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+    		}
+    		System.out.println( dateFormat.format(new java.util.Date()) + " " + Thread.currentThread().getName() + " - " + msg );
+    	}
     }
 
+    private void setDebugStatus ( ConfigMap props ) {
+    	String debugString = props.getProperty( P_NAME_ENABLE_DEBUG );
+    	
+    	if ( debugString != null && debugString.toLowerCase().equals( "true" ) ) {
+    		DEBUG_ON = true;
+    	} else {
+    		DEBUG_ON = false;
+    	}
+    }
+    
+    private String threadNameCount ( String currentName ) {
+    	
+    	if ( DEBUG_ON ) {
+	    	Pattern p = Pattern.compile("-R\\d{1,10}");
+	    	Matcher m = p.matcher( currentName );
+	    	
+	    	if ( m.find() ) {
+	    		String realName = currentName.substring( 0 , currentName.length() - m.group(0).length() );
+	    		int count = Integer.parseInt( m.group(0).substring(2) );
+	    		
+	    		count++;
+	    		currentName = realName + "-R" + count;
+	    		
+	    	} else {
+	    		currentName += "-R0";
+	    	}
+    	}
+    	
+    	return currentName;
+    }
+        
+    //--------------------------------------------------------------------------
+    //
+    // Endpoint methods
+    //
+    //--------------------------------------------------------------------------    
+    
     @Override
     public void start() {
-        debug("Goind to start servelt 3 endpoint");
-        if (isStarted())
+        debug("Starting Servelt 3 endpoint");
+        
+        if ( isStarted() )
             return;
 
         super.start();
 
-        if (getConnectionIdleTimeoutMinutes() > 0) {
+        if ( getConnectionIdleTimeoutMinutes() > 0 ) {
             pushNotifierTimeoutManager = new TimeoutManager(
                     new ThreadFactory() {
                         int counter = 1;
@@ -294,7 +269,8 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
      */
     @Override
     public void stop() {
-        debug("stopping!!!");
+        debug("Stopping...");
+        
         if (!isStarted())
             return;
 
@@ -312,17 +288,184 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
         
         clearThreadLocals();
         
-        debug("before notifier shutdown");
         //Shutdown the single threaded executor - HT
         notifierThread.shutdownNow();
-        //notifierThread.shutdown();
-        
-        debug("before super.stop");
+
         super.stop();
         
-        debug("stop completing");
+        debug("Stop completed.");
     }
 
+    /**
+     * This method will be only used by the ExecutorService to push messages
+     * to the clients connected. This must NOT be called from anywhere else.
+     */
+    private void pushMessages ( ) {
+    	
+    	//Continue to push only if the queue contains AsyncContexts - HT
+        while ( !queue.isEmpty() ) {
+        	
+            for (AsyncContext ac : queue) {
+            	
+                EndpointPushNotifier notifier = null;
+                try {
+                	//If the AsyncContext has completed (due to timeout) then remove it.
+                    if ( ac.getRequest() == null || !ac.getRequest().isAsyncStarted() ) {
+                        cleanUp( ac, notifier );
+                        continue;
+                    }
+                    
+                    notifier = (EndpointPushNotifier) ac.getRequest().getAttribute("pushNotifier");
+                    FlexClient flexClient = (FlexClient) ac.getRequest().getAttribute("flexClient");
+                    HttpServletResponse res = (HttpServletResponse) ac.getResponse();
+                    ServletOutputStream os = res.getOutputStream();
+                    
+                    if (notifier.isClosed()) {
+                        debug("Notifier seems to be closed. Ending streaming :" + flexClient.getId() );
+                        
+                        // Terminate the response.
+                        streamChunk(null, os, res);
+                        cleanUp( ac, notifier );
+                    }
+                    
+                    synchronized (notifier.pushNeeded) {
+                    
+                        // Drain any messages that might have been accumulated
+                        // while the previous drain was being processed.
+                    	List<AsyncMessage> messages = notifier.drainMessages();
+                   
+                    	if ( !notifier.isClosed() && messages != null && !messages.isEmpty() ) {
+                    		streamMessages( messages, os, res);
+                    	}
+                    	
+                        notifier.pushNeeded.wait( getServerToClientHeartbeatMillis() );
+
+                        messages = null;
+                        messages = notifier.drainMessages();
+                        // If there are no messages to send to the client, send an null
+                        // byte as a heartbeat to make sure the client is still valid.
+                        if ( !notifier.isClosed() ) {
+                        	
+                            if (messages == null && getServerToClientHeartbeatMillis() > 0) {
+                                try {
+                                    os.write(NULL_BYTE);
+                                    res.flushBuffer();
+                                } catch ( IOException ioe ) {
+                                	debug("ERROR: IOError occured when pushing null byte :" + ioe.getMessage() );
+                                	cleanUp( ac, notifier );
+                                	continue;
+                                } catch (Exception e) {
+                                	debug("ERROR: Error occured when pushing null byte :" + e.getMessage() );
+                                	
+                                    if (Log.isWarn()) {
+                                        log.warn("Endpoint with id '" + getId() + "' is closing the streaming connection to FlexClient with id '"
+                                                + flexClient.getId() + "' because endpoint encountered a socket write error" +
+                                        ", possibly due to an unresponsive FlexClient.", e);
+                                    }
+                                    cleanUp( ac, notifier );
+                                    continue;
+                                }
+                                
+                            } else { // Otherwise stream the messages to the client.
+                                debug("Stream messages");
+                                // Update the last time notifier was used to drain messages.
+                                // Important for idle timeout detection.
+                                streamMessages(messages, os, res);
+                                notifier.updateLastUse();
+                            }
+                            
+                        } else {
+                        	debug("Nothing is pushed since the notifier is closed :" + flexClient.getId() );
+                        }
+                        
+                    }
+                    // Update the FlexClient last use time to prevent FlexClient from
+                    // timing out when the client is still subscribed. It is important
+                    // to do this outside synchronized(notifier.pushNeeded) to avoid
+                    // thread deadlock!
+                    flexClient.updateLastUse();
+                
+                    
+                } catch (Exception ex) {
+                	debug("ERROR: Error occured in push loop :" + ex.getMessage() );
+                    //ex.printStackTrace();
+                    cleanUp( ac, notifier );
+                }
+                
+            }
+        }
+        
+    }
+    
+    /**
+     * Clean up the AsyncContext and EndpointPushNotifier assure it is closed
+     * @param ac
+     * @param notifier
+     */
+    private void cleanUp( AsyncContext ac, EndpointPushNotifier notifier ) {
+        try {
+			debug("Clean Up called");
+			
+			//If the context is still not committed, go ahead and commit it.
+			if ( ac.getRequest().isAsyncStarted() ) {
+                ac.complete();
+            }
+			
+			//Remove the context from the queue
+            queue.remove(ac);
+
+            if (notifier != null && currentStreamingRequests != null) {
+                currentStreamingRequests.remove( notifier.getNotifierId() );
+                notifier.close();
+            }
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+    
+    
+    private EndpointPushNotifier terminateExistingContext ( HttpServletResponse res, FlexClient flexClient ) {
+    	EndpointPushNotifier notifier = null;
+    	
+     	if ( res.isCommitted() ) {
+     		//Find the context of the client that is making the duplicate request
+     		for ( AsyncContext ac : queue ) {
+     			FlexClient oldFlexClient = (FlexClient) ac.getRequest().getAttribute("flexClient");
+     			
+     			if ( oldFlexClient.getId().equals( flexClient.getId() ) ) {
+     				debug ( "Found matching client :" + flexClient.equals( oldFlexClient )  );
+     				
+     				//Get the notifier attached to the context
+     				notifier = (EndpointPushNotifier) ac.getRequest().getAttribute("pushNotifier");
+     				
+     				//Kill the context so a new one can be created
+     				cleanUp( ac, notifier );
+     				
+     				//Create a notifier with the client 
+     				try { 
+     					notifier = new EndpointPushNotifier( this, flexClient );
+     				} catch ( Exception e ) {
+     					debug ( "ERROR: Second attempt to create notifier failed" );
+     				}
+     			}
+     			
+     		}
+     		
+     	} else {
+     		try {
+     			debug ( "Going to send error. Response is not committed" );
+     			res.sendError(HttpServletResponse.SC_BAD_REQUEST);
+     		} catch (Exception ignore) {
+     			debug ( "ERROR: Exception when trying to send error" );
+     		}    	
+     		
+     	}
+     	
+     	return notifier;
+         
+    }
+    
     //--------------------------------------------------------------------------
     //
     // Protected Methods
@@ -338,8 +481,10 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
      * @param flexClient FlexClient that requested the streaming connection.
      */
     protected void handleFlexClientStreamingOpenRequest(HttpServletRequest req, HttpServletResponse res, FlexClient flexClient) {
-        debug("we are getting open request");
+        
+    	debug("we are getting open request from client :" + flexClient.getId() );
         final FlexSession session = FlexContext.getFlexSession();
+        
         if (canStream && session.canStream) {
             debug("can stream");
             debug("streamingClientsCount " + streamingClientsCount);
@@ -373,6 +518,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                             + flexClient.getId() + "' because max-streaming-clients limit of '"
                             + maxStreamingClients + "' has been reached.");
                 try {
+                	debug ( "Going to send error. Response committed:" + res.isCommitted() );
                     // Return an HTTP status code 400.
                     res.sendError(HttpServletResponse.SC_BAD_REQUEST);
                 } catch (IOException ignore) {}
@@ -433,6 +579,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                             + flexClient.getId() + "' because " + UserAgentManager.MAX_PERSISTENT_CONNECTIONS_PER_SESSION + " limit of '" + session.maxConnectionsPerSession
                             + ((agentSettings != null) ? "' for user-agent '" + agentSettings.getMatchOn() + "'" : "") +  " has been reached." );
                 try {
+                	debug ( "Going to send error. Response committed:" + res.isCommitted() );
                  // Return an HTTP status code 400.
                     res.sendError(HttpServletResponse.SC_BAD_REQUEST);
                 } catch (IOException ignore) {
@@ -447,7 +594,8 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
             boolean suppressIOExceptionLogging = false; // Used to suppress logging for IO exception.
             try {
                 debug("goint to start streaming");
-                currentThread.setName(threadName + "-in-streaming-mode");
+                //currentThread.setName(threadName + "-in-streaming-mode");
+                currentThread.setName( this.threadNameCount( threadName ) );
 
                 // Open and commit response headers and get output stream.
                 if (addNoCacheHeaders)
@@ -480,29 +628,37 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                     notifier = new EndpointPushNotifier(this, flexClient);
                     debug("push notifier created");
                 } catch (MessageException me) {
-                    debug("got message exception");
+                    debug("ERROR: got message exception");
                     if (me.getNumber() == 10033) { // It's a duplicate stream request from the same FlexClient. Leave the current stream in place and fault this.
-                        if (Log.isWarn())
+                        if (Log.isWarn()) {
                             log.error("Endpoint with id '" + getId() + "' received a duplicate streaming connection request from, FlexClient with id '"
                                     + flexClient.getId() + "'. Faulting request.");
-
-                        // Rollback counters and send an error response.
-                        synchronized (lock) {
-                            --streamingClientsCount;
-                            canStream = (streamingClientsCount < maxStreamingClients);
-                            synchronized (session) {
-                                --session.streamingConnectionsCount;
-                                session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
-                            }
                         }
-                        try {
-                            res.sendError(HttpServletResponse.SC_BAD_REQUEST);
-                        } catch (IOException ignore) {
-                            // NOWARN
+                        
+                        //Try to kill existing notifier and create new one
+                        // This must be attempted since there is a known issue in Tomcat 7 where
+                        // when a client closes a connection the connection does not seem to get closed in the server.
+                        // Hiraash
+                        notifier = this.terminateExistingContext(res, flexClient);
+                        
+                        //If creating notifier failed again
+                        if ( notifier == null ) {
+	                        // Rollback counters and send an error response.
+	                        synchronized (lock) {
+	                            --streamingClientsCount;
+	                            canStream = (streamingClientsCount < maxStreamingClients);
+	                            synchronized (session) {
+	                                --session.streamingConnectionsCount;
+	                                session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
+	                            }
+	                        }
+	
+	                        debug ( "Open request ignored!" );
+	                        return; // Exit early.
                         }
-                        return; // Exit early.
                     }
                 }
+                
                 if (getConnectionIdleTimeoutMinutes() > 0) {
                     notifier.setIdleTimeoutMinutes(getConnectionIdleTimeoutMinutes());
                     debug("set connection idle timeout minutes to " + getConnectionIdleTimeoutMinutes());
@@ -534,17 +690,17 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 actx.addListener(new AsyncListener() {
                     @Override
                     public void onTimeout(AsyncEvent event) throws IOException {
-                        debug("AsyncContext Timeout! " + event.toString() );
+                        debug("AsyncContext Timeout! " );
                     }
                     
                     @Override
                     public void onStartAsync(AsyncEvent event) throws IOException {
-                        debug("AsyncContext Start async! " + event.toString() );
+                        debug("AsyncContext Start async! " );
                     }
                     
                     @Override
                     public void onError(AsyncEvent event) throws IOException {
-                        debug("AsyncContext Error! " + event.toString() );
+                        debug("ERROR: AsyncContext Error! " );
                     }
                     
                     @Override
@@ -565,12 +721,7 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                         if (notifier != null && currentStreamingRequests != null) {
                             currentStreamingRequests.remove(notifier.getNotifierId());
                             notifier.close();
-                        }
-                        
-                        synchronized (session) {
-                            --session.streamingConnectionsCount;
-                            session.canStream = (session.streamingConnectionsCount < session.maxConnectionsPerSession);
-                        }
+                        } 
                         
                        //If the flex client closes the session the FlexSession would be null at this point -HT
                         if (session != null) {
@@ -598,10 +749,12 @@ public abstract class BaseServlet3Endpoint extends BaseStreamingHTTPEndpoint {
                 queue.add(actx);
                 
                 //If the notifier thread is not running then start it.
-                if ( !notifierRunning ) {
+                if ( threadState == null || threadState.isDone() ){
                 	debug( "starting notifierThread running");
-                	notifierThread.execute( notifierRunnable );
+                	threadState = notifierThread.submit( notifierRunnable );
+                
                 }
+                
                 
             } catch (IOException e) {
                 if (Log.isWarn() && !suppressIOExceptionLogging)
