@@ -8,7 +8,7 @@
  protocol="org.apache.coyote.http11.Http11NioProtocol" redirectPort="8443"/>
 }}}
 
-  * In your Tomcat BlazeDS application context change the Servlet configuration to allow asynchronous capability for the MessageBrokerServlet. This should be done in the web.xml as follows.
+  * In your Tomcat BlazeDS application context change the Servlet configuration to allow asynchronous capability for the MessageBrokerServlet. This should be done in the web.xml as follows. Notice the lines marked by `*`
 {{{
 <servlet>
   <servlet-name>MessageBrokerServlet</servlet-name>
