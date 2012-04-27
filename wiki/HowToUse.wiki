@@ -1,6 +1,6 @@
-  #1 Install Tomcat 7 and Blaze DS 4. The turnkey install of BlazeDS 4 is not going to work since it ships with Tomcat 6.
+  * Install Tomcat 7 and Blaze DS 4. The turnkey install of BlazeDS 4 is not going to work since it ships with Tomcat 6.
 
-  #2 Once you have Tomcat and BlazeDS working fine, change the Tomcat Connector configuration to use the NIO connector instead of the BIO conntector. The setting is in the server.xmland should be changed as follows.
+  * Once you have Tomcat and BlazeDS working fine, change the Tomcat Connector configuration to use the NIO connector instead of the BIO conntector. The setting is in the server.xmland should be changed as follows.
 {{{
 <!--<Connector port="8400" protocol="HTTP/1.1"
  connectionTimeout="20000" redirectPort="8443"/>-->
@@ -8,7 +8,7 @@
  protocol="org.apache.coyote.http11.Http11NioProtocol" redirectPort="8443"/>
 }}}
 
-  #3 In your Tomcat BlazeDS application context change the Servlet configuration to allow asynchronous capability for the MessageBrokerServlet. This should be done in the web.xml as follows.
+  * In your Tomcat BlazeDS application context change the Servlet configuration to allow asynchronous capability for the MessageBrokerServlet. This should be done in the web.xml as follows.
 {{{
 <servlet>
   <servlet-name>MessageBrokerServlet</servlet-name>
@@ -28,9 +28,9 @@
 </filter>
 }}}
 
-  #4 Copy the compiled blazeds-servlet3-support jar file to the WEB-INF/lib folder of the context.
+  * Copy the compiled blazeds-servlet3-support jar file to the WEB-INF/lib folder of the context.
 
-  #5 Change the WEB-INF/flex/service-config endpoint as follows.
+  * Change the WEB-INF/flex/service-config endpoint as follows.
 {{{
 <channel-definition id="amf-stream" class="mx.messaging.channels.StreamingAMFChannel">
   <endpoint url="http://{server.name}:{server.port}/{context.root}/messagebroker/streamingamf" 
@@ -43,7 +43,7 @@
 </channel-definition>
 }}}
 
-  #6 Restart Tomcat and you should be good to go!
+  * Restart Tomcat and you should be good to go!
 
 
 An explanation of how this can be used can be found in the following post
