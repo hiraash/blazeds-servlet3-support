@@ -15,6 +15,9 @@
 }}}
 
 *idle-timeout-minutes* - Use this to set the time-outs for the streaming connections
+
 *max-streaming-clients* - Use this to set the total number of streaming clients you want to limit the endpoint to.
+
 *server-to-client-heartbeat-millis* - Use this to adjust the latency vs server process consumption. Reducing this value may make your server go hot. Increasing the value will increase the latency on the messages 
+
 *enable-debug-mode* - Keep this false unless you want to see the code traces on your server log. This can make your log files bloat up pretty fast
