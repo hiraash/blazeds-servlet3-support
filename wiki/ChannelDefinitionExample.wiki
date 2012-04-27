@@ -4,7 +4,7 @@
 {{{
 <channel-definition id="amf-stream" class="mx.messaging.channels.StreamingAMFChannel">
    <endpoint url="http://{server.name}:{server.port}/{context.root}/messagebroker/streamingamf" 
-     class="com.cinergix.servlet3.endpoint.AMFServlet3Endpoint"/>
+     class="org.iobit.servlet3.endpoint.AMFServlet3Endpoint"/>
     <properties>
      <idle-timeout-minutes>7</idle-timeout-minutes>
      <max-streaming-clients>500</max-streaming-clients>        
